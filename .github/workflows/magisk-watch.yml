@@ -1,0 +1,102 @@
+name: Magisk release watcher (to Telegram)
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"   # tiap 30 menit (UTC)
+  workflow_dispatch: {}       # bisa run manual
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download last state (artifact)
+        uses: actions/download-artifact@v4
+        with:
+          name: magisk-state
+          path: .
+        continue-on-error: true
+
+      - name: Read last tag
+        id: state
+        run: |
+          if [ -f last_tag.txt ]; then
+            echo "last_tag=$(cat last_tag.txt)" >> $GITHUB_OUTPUT
+          else
+            echo "last_tag=" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Fetch latest Magisk release
+        id: latest
+        run: |
+          curl -s https://api.github.com/repos/topjohnwu/Magisk/releases/latest > latest.json
+          tag=$(jq -r .tag_name latest.json)
+          name=$(jq -r .name latest.json)
+          published=$(jq -r .published_at latest.json)
+          url=$(jq -r .html_url latest.json)
+          body=$(jq -r .body latest.json)
+
+          echo "tag=$tag" >> $GITHUB_OUTPUT
+          echo "name=$name" >> $GITHUB_OUTPUT
+          echo "published=$published" >> $GITHUB_OUTPUT
+          echo "url=$url" >> $GITHUB_OUTPUT
+
+          echo "$body" > body.txt
+
+      - name: Decide new release
+        id: decide
+        run: |
+          if [ "${{ steps.latest.outputs.tag }}" = "${{ steps.state.outputs.last_tag }}" ]; then
+            echo "new=false" >> $GITHUB_OUTPUT
+          else
+            echo "new=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Extract highlights (zygisk/denylist/hide)
+        if: steps.decide.outputs.new == 'true'
+        id: hl
+        run: |
+          # ambil baris yang mengandung keyword penting, max 8 baris
+          grep -iE "zygisk|denylist|hide|sulist|shamiko|namespace|mount" body.txt \
+            | head -n 8 > highlights.txt || true
+
+          if [ -s highlights.txt ]; then
+            echo "highlights<<EOF" >> $GITHUB_OUTPUT
+            sed 's/$/\\n/' highlights.txt >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+          else
+            echo "highlights=• (no zygisk/denylist/hide highlight detected)\\n" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Send Telegram message
+        if: steps.decide.outputs.new == 'true'
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          msg="<b>Magisk Release Detected</b>%0A"
+          msg="$msg<b>Name:</b> ${{ steps.latest.outputs.name }}%0A"
+          msg="$msg<b>Version/Tag:</b> ${{ steps.latest.outputs.tag }}%0A"
+          msg="$msg<b>Published:</b> ${{ steps.latest.outputs.published }}%0A"
+          msg="$msg<b>Link:</b> ${{ steps.latest.outputs.url }}%0A%0A"
+          msg="$msg<b>Highlights (Zygisk/DenyList/Hide):</b>%0A"
+          # highlights sudah mengandung \n yang kita encode jadi %0A
+          hl="${{ steps.hl.outputs.highlights }}"
+          hl_encoded=$(printf "%s" "$hl" | sed 's/\\n/%0A/g')
+          msg="$msg$hl_encoded"
+
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d "chat_id=${TELEGRAM_CHAT_ID}" \
+            -d "text=${msg}" \
+            -d "parse_mode=HTML" \
+            -d "disable_web_page_preview=true"
+
+      - name: Update last tag
+        run: |
+          echo "${{ steps.latest.outputs.tag }}" > last_tag.txt
+
+      - name: Upload state artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: magisk-state
+          path: last_tag.txt
+          retention-days: 30
