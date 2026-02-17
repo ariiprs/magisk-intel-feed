@@ -2,7 +2,7 @@ name: Magisk watcher (release + code updates) -> Telegram
 
 on:
   schedule:
-    - cron: "*/30 * * * *"   # tiap 30 menit (UTC)
+    - cron: "0 2,10 * * *"   # tiap 30 menit (UTC)
   workflow_dispatch: {}
 
 jobs:
